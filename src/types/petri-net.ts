@@ -1,37 +1,19 @@
-export interface Place {
-  id: string;
-  name: string;
-  tokens: number;
-  x: number;
-  y: number;
-}
+export type TransitionName =
+  | 'inc_tank'
+  | 'dec_tank'
+  | 'toggle_emergency'
+  | 'start_pump'
+  | 'irrigate_zone1'
+  | 'irrigate_zone2'
 
-export interface Transition {
-  id: string;
-  name: string;
-  enabled: boolean;
-  x: number;
-  y: number;
-}
-
-export interface Arc {
-  id: string;
-  source: string;
-  target: string;
-  weight: number;
-  type: 'normal' | 'inhibitor';
-}
-
-export interface PetriNet {
-  places: Place[];
-  transitions: Transition[];
-  arcs: Arc[];
-}
-
-export interface IrrigationState {
-  zones: number;
-  reservoirLevel: number;
-  emergency: boolean;
-  soilDry: boolean[];
-  autoMode: boolean;
+export type PetriMarking = {
+  atRest: number
+  reservoirOk: number
+  zone1Watered: number
+  zone2Watered: number
+  pumpBusy: number
+  emergency: number
+  turnZone1: number
+  turnZone2: number
+  tankLevel: number
 }
