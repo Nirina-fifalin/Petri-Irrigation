@@ -1,311 +1,108 @@
-"use client";
+export type PetriMarking = {
+  atRest: number;
+  reservoirOk: number;
+  zone1Watered: number;
+  zone2Watered: number;
+  pumpBusy: number;
+  emergency: number;
+  turnZone1: number;
+  turnZone2: number;
+  tankLevel: number;
+};
 
-import { PetriNet, Place, Transition, Arc, IrrigationState } from '@/types/petri-net';
+export type TransitionName =
+  | 'inc_tank'
+  | 'dec_tank'
+  | 'toggle_emergency'
+  | 'start_pump'
+  | 'irrigate_zone1'
+  | 'irrigate_zone2'
+  | 'to_atRest';
 
-export class PetriNetEngine {
-  private net: PetriNet;
-  private state: IrrigationState;
-  private timers: Map<string, NodeJS.Timeout> = new Map();
-  private onStateChange?: () => void;
+let currentMarking: PetriMarking = {
+  atRest: 1,
+  reservoirOk: 1,
+  zone1Watered: 0,
+  zone2Watered: 0,
+  pumpBusy: 0,
+  emergency: 0,
+  turnZone1: 1,
+  turnZone2: 0,
+  tankLevel: 5,
+};
 
-  constructor(zones: number = 1) {
-    this.state = {
-      zones,
-      reservoirLevel: 50,
-      emergency: false,
-      soilDry: new Array(zones).fill(false),
-      autoMode: false
-    };
-    this.net = this.createIrrigationNet(zones);
-  }
+export function getInitialMarking(): PetriMarking {
+  return { ...currentMarking };
+}
 
-  public setOnStateChange(callback: () => void) {
-    this.onStateChange = callback;
-  }
+function consume(m: PetriMarking, key: keyof PetriMarking, amount = 1): void {
+  m[key] = Math.max(0, m[key] - amount);
+}
 
-  private notifyStateChange() {
-    if (this.onStateChange) {
-      this.onStateChange();
-    }
-  }
+function produce(m: PetriMarking, key: keyof PetriMarking, amount = 1): void {
+  m[key] = m[key] + amount;
+}
 
-  private createIrrigationNet(zones: number): PetriNet {
-    const places: Place[] = [
-      { id: 'reservoir', name: 'Reservoir', tokens: this.state.reservoirLevel, x: 100, y: 100 },
-      { id: 'emergency', name: 'Emergency', tokens: this.state.emergency ? 1 : 0, x: 300, y: 50 },
-    ];
+export function applyTransition(transition: TransitionName): PetriMarking {
+  const newMarking = { ...currentMarking };
 
-    const transitions: Transition[] = [];
-    const arcs: Arc[] = [];
+  switch (transition) {
+    case 'inc_tank':
+      produce(newMarking, 'tankLevel');
+      if (newMarking.tankLevel > 0) newMarking.reservoirOk = 1;
+      break;
 
-    for (let i = 0; i < zones; i++) {
-      const zoneId = `zone_${i}`;
+    case 'dec_tank':
+      consume(newMarking, 'tankLevel');
+      if (newMarking.tankLevel === 0) newMarking.reservoirOk = 0;
+      break;
+
+    case 'toggle_emergency':
+      newMarking.emergency = newMarking.emergency ? 0 : 1;
+      break;
+
+    case 'start_pump':
+      if (newMarking.emergency) throw new Error('Mode urgence actif');
+      if (!newMarking.atRest) throw new Error('Système pas au repos');
+      if (!newMarking.reservoirOk) throw new Error('Reservoir vide');
       
-      places.push(
-        { id: `soil_dry_${i}`, name: `Soil Dry ${i+1}`, tokens: 0, x: 200, y: 150 + i * 120 },
-        { id: `watering_${i}`, name: `Watering ${i+1}`, tokens: 0, x: 400, y: 150 + i * 120 },
-        { id: `soil_wet_${i}`, name: `Soil Wet ${i+1}`, tokens: 1, x: 600, y: 150 + i * 120 },
-        { id: `irrigation_timer_${i}`, name: `Timer ${i+1}`, tokens: 0, x: 500, y: 200 + i * 120 }
-      );
+      consume(newMarking, 'atRest');
+      consume(newMarking, 'reservoirOk');
+      produce(newMarking, 'pumpBusy');
+      break;
 
-      transitions.push(
-        { id: `start_pump_${i}`, name: `Start Pump ${i+1}`, enabled: false, x: 300, y: 150 + i * 120 },
-        { id: `irrigation_active_${i}`, name: `Irrigate ${i+1}`, enabled: false, x: 450, y: 150 + i * 120 },
-        { id: `stop_irrigation_${i}`, name: `Stop ${i+1}`, enabled: false, x: 550, y: 150 + i * 120 },
-        { id: `soil_drying_${i}`, name: `Dry ${i+1}`, enabled: false, x: 400, y: 200 + i * 120 }
-      );
-
-      arcs.push(
-        { id: `arc_reservoir_start_${i}`, source: 'reservoir', target: `start_pump_${i}`, weight: 5, type: 'normal' },
-        { id: `arc_soil_dry_start_${i}`, source: `soil_dry_${i}`, target: `start_pump_${i}`, weight: 1, type: 'normal' },
-        { id: `arc_start_watering_${i}`, source: `start_pump_${i}`, target: `watering_${i}`, weight: 1, type: 'normal' },
-
-        { id: `arc_watering_irrigate_${i}`, source: `watering_${i}`, target: `irrigation_active_${i}`, weight: 1, type: 'normal' },
-        { id: `arc_irrigate_timer_${i}`, source: `irrigation_active_${i}`, target: `irrigation_timer_${i}`, weight: 1, type: 'normal' },
-
-        { id: `arc_timer_stop_${i}`, source: `irrigation_timer_${i}`, target: `stop_irrigation_${i}`, weight: 1, type: 'normal' },
-        { id: `arc_stop_wet_${i}`, source: `stop_irrigation_${i}`, target: `soil_wet_${i}`, weight: 1, type: 'normal' },
-
-        { id: `arc_wet_drying_${i}`, source: `soil_wet_${i}`, target: `soil_drying_${i}`, weight: 1, type: 'normal' },
-        { id: `arc_drying_dry_${i}`, source: `soil_drying_${i}`, target: `soil_dry_${i}`, weight: 1, type: 'normal' },
-
-        { id: `arc_emergency_start_${i}`, source: 'emergency', target: `start_pump_${i}`, weight: 1, type: 'inhibitor' }
-      );
-    }
-
-    return { places, transitions, arcs };
-  }
-
-  public updateState(newState: Partial<IrrigationState>) {
-    this.state = { ...this.state, ...newState };
-    this.updateNetFromState();
-  }
-
-  private updateNetFromState() {
-    const reservoirPlace = this.net.places.find(p => p.id === 'reservoir');
-    if (reservoirPlace) reservoirPlace.tokens = this.state.reservoirLevel;
-
-    const emergencyPlace = this.net.places.find(p => p.id === 'emergency');
-    if (emergencyPlace) emergencyPlace.tokens = this.state.emergency ? 1 : 0;
-
-    for (let i = 0; i < this.state.zones; i++) {
-      const soilDryPlace = this.net.places.find(p => p.id === `soil_dry_${i}`);
-      if (soilDryPlace) soilDryPlace.tokens = this.state.soilDry[i] ? 1 : 0;
-    }
-
-    this.updateTransitionStates();
-  }
-
-  private updateTransitionStates() {
-    this.net.transitions.forEach(transition => {
-      transition.enabled = this.canFireTransition(transition.id);
-    });
-  }
-
-  private canFireTransition(transitionId: string): boolean {
-    const inputArcs = this.net.arcs.filter(arc => arc.target === transitionId);
-    
-    for (const arc of inputArcs) {
-      const sourcePlace = this.net.places.find(p => p.id === arc.source);
-      if (!sourcePlace) continue;
-
-      if (arc.type === 'inhibitor') {
-        if (sourcePlace.tokens > 0) return false;
-      } else {
-        if (sourcePlace.tokens < arc.weight) return false;
-      }
-    }
-
-    return true;
-  }
-
-  public fireTransition(transitionId: string): boolean {
-    if (!this.canFireTransition(transitionId)) return false;
-
-    const inputArcs = this.net.arcs.filter(arc => arc.target === transitionId && arc.type === 'normal');
-    const outputArcs = this.net.arcs.filter(arc => arc.source === transitionId);
-
-    inputArcs.forEach(arc => {
-      const sourcePlace = this.net.places.find(p => p.id === arc.source);
-      if (sourcePlace) {
-        sourcePlace.tokens = Math.max(0, sourcePlace.tokens - arc.weight);
-
-        if (sourcePlace.id === 'reservoir') {
-          this.state.reservoirLevel = sourcePlace.tokens;
-        }
-      }
-    });
-
-    outputArcs.forEach(arc => {
-      const targetPlace = this.net.places.find(p => p.id === arc.target);
-      if (targetPlace) {
-        targetPlace.tokens += arc.weight;
-      }
-    });
-
-    this.handleTimedTransition(transitionId);
-
-    this.updateTransitionStates();
-    this.notifyStateChange();
-    return true;
-  }
-
-  private handleTimedTransition(transitionId: string) {
-    if (transitionId.includes('start_pump_')) {
-      const zoneIndex = parseInt(transitionId.split('_')[2]);
-
-      setTimeout(() => {
-        this.fireTransition(`irrigation_active_${zoneIndex}`);
-      }, 5000);
+    case 'irrigate_zone1':
+      if (!newMarking.pumpBusy) throw new Error('Pompe inactive');
+      if (!newMarking.turnZone1) throw new Error('Pas le tour zone 1');
+      if (newMarking.tankLevel <= 0) throw new Error('Plus d\'eau');
       
-    } else if (transitionId.includes('irrigation_active_')) {
-      const zoneIndex = parseInt(transitionId.split('_')[2]);
+      consume(newMarking, 'tankLevel');
+      produce(newMarking, 'zone1Watered');
+      newMarking.turnZone1 = 0;
+      newMarking.turnZone2 = 1;
+      consume(newMarking, 'pumpBusy');
+      break;
 
-      setTimeout(() => {
-        this.fireTransition(`stop_irrigation_${zoneIndex}`);
-      }, 5000);
+    case 'irrigate_zone2':
+      if (!newMarking.pumpBusy) throw new Error('Pompe inactive');
+      if (!newMarking.turnZone2) throw new Error('Pas le tour zone 2');
+      if (newMarking.tankLevel <= 0) throw new Error('Plus d\'eau');
       
-    } else if (transitionId.includes('stop_irrigation_')) {
-      const zoneIndex = parseInt(transitionId.split('_')[2]);
+      consume(newMarking, 'tankLevel');
+      produce(newMarking, 'zone2Watered');
+      newMarking.turnZone2 = 0;
+      newMarking.turnZone1 = 1;
+      consume(newMarking, 'pumpBusy');
+      break;
 
-      setTimeout(() => {
-        this.fireTransition(`soil_drying_${zoneIndex}`);
-      }, 2000);
-    }
+    case 'to_atRest':
+      produce(newMarking, 'atRest');
+      break;
+
+    default:
+      throw new Error(`Transition inconnue: ${transition}`);
   }
 
-  public fireAllEnabledTransitions(): number {
-    let firedCount = 0;
-    let changed = true;
-
-    while (changed && firedCount < 50) { // Réduire la limite pour éviter les boucles infinies
-      changed = false;
-
-      const priorityTransitions = this.net.transitions
-        .filter(t => t.enabled)
-        .sort((a, b) => {
-          const getPriority = (id: string) => {
-            if (id.includes('irrigation_active_')) return 1;
-            if (id.includes('stop_irrigation_')) return 2;
-            if (id.includes('soil_drying_')) return 3;
-            if (id.includes('start_pump_')) return 4;
-            return 5;
-          };
-          return getPriority(a.id) - getPriority(b.id);
-        });
-
-      for (const transition of priorityTransitions.slice(0, 3)) { 
-        if (transition.enabled) {
-          if (this.fireTransition(transition.id)) {
-            firedCount++;
-            changed = true;
-            break;
-          }
-        }
-      }
-    }
-
-    return firedCount;
-  }
-
-  public startAllPumps() {
-    for (let i = 0; i < this.state.zones; i++) {
-      const soilDryPlace = this.net.places.find(p => p.id === `soil_dry_${i}`);
-      if (soilDryPlace && soilDryPlace.tokens === 0) {
-        soilDryPlace.tokens = 1;
-      }
-      this.fireTransition(`start_pump_${i}`);
-    }
-    this.updateTransitionStates();
-  }
-
-  public startIrrigationCycle() {
-    console.log('Démarrage du cycle d\'irrigation automatique...');
-
-    for (let i = 0; i < this.state.zones; i++) {
-      const soilDryPlace = this.net.places.find(p => p.id === `soil_dry_${i}`);
-      const soilWetPlace = this.net.places.find(p => p.id === `soil_wet_${i}`);
-      
-      if (soilWetPlace && soilWetPlace.tokens > 0) {
-        soilWetPlace.tokens = 0;
-        if (soilDryPlace) {
-          soilDryPlace.tokens = 1;
-        }
-      }
-    }
-    
-    this.updateTransitionStates();
-    this.notifyStateChange();
-
-    setTimeout(() => {
-      this.fireAllEnabledTransitions();
-    }, 100);
-  }
-
-  public cleanup() {
-    this.timers.forEach(timer => clearTimeout(timer));
-    this.timers.clear();
-  }
-
-  public getNet(): PetriNet {
-    return this.net;
-  }
-
-  public getState(): IrrigationState {
-    return this.state;
-  }
-
-  public exportToPNML(): string {
-    let pnml = `<?xml version="1.0" encoding="UTF-8"?>
-<pnml>
-  <net id="irrigation_net" type="P/T net">
-    <name>
-      <text>Irrigation Petri Net</text>
-    </name>`;
-
-    this.net.places.forEach(place => {
-      pnml += `
-    <place id="${place.id}">
-      <name>
-        <text>${place.name}</text>
-      </name>
-      <initialMarking>
-        <text>${place.tokens}</text>
-      </initialMarking>
-      <graphics>
-        <position x="${place.x}" y="${place.y}"/>
-      </graphics>
-    </place>`;
-    });
-
-    this.net.transitions.forEach(transition => {
-      pnml += `
-    <transition id="${transition.id}">
-      <name>
-        <text>${transition.name}</text>
-      </name>
-      <graphics>
-        <position x="${transition.x}" y="${transition.y}"/>
-      </graphics>
-    </transition>`;
-    });
-
-    this.net.arcs.forEach(arc => {
-      pnml += `
-    <arc id="${arc.id}" source="${arc.source}" target="${arc.target}">
-      <inscription>
-        <text>${arc.weight}</text>
-      </inscription>
-      <type>
-        <text>${arc.type}</text>
-      </type>
-    </arc>`;
-    });
-
-    pnml += `
-  </net>
-</pnml>`;
-
-    return pnml;
-  }
+  currentMarking = newMarking;
+  return { ...currentMarking };
 }
